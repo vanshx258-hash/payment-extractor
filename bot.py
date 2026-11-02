@@ -8,35 +8,32 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import User
 
 # ================== CONFIG ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 OWNER_ID = int(os.environ.get("OWNER_ID", "8586849798"))
 API_ID = int(os.environ.get("API_ID", "38746329"))
 API_HASH = os.environ.get("API_HASH", "dc6d3dd0de462ed07952a64c3253c437")
-PORT = int(os.environ.get("PORT", 10000)) # Render automatically PORT dega
+PORT = int(os.environ.get("PORT", 10000))
 
-MONITOR_BOT = "paymentcheclerrrrrx_bot"
+# Jis Bot ka message pakadna hai
+TARGET_BOT_USERNAME = "paymentcheclerrrrrx_bot"
 
 (ASK_PHONE, ASK_OTP, ASK_2FA, ASK_TARGET_GROUP) = range(4)
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ================== RENDER PORT SERVER ==================
+# ================== PORT SERVER ==================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
+        self.send_response(200); self.send_header('Content-type', 'text/html'); self.end_headers()
         self.wfile.write(b"Bot is running perfectly!")
-        
-    def log_message(self, format, *args):
-        pass # Ignore request logs
+    def log_message(self, format, *args): pass
 
 def run_server():
     server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
-    print(f"Server running on port {PORT}")
     server.serve_forever()
 
 # ================== DATABASE ==================
@@ -57,7 +54,7 @@ def db_execute(query, params=()):
     conn.close()
     return res
 
-# ================== USERBOT ==================
+# ================== USERBOT (Message Reader) ==================
 userbot_clients = {} 
 
 async def start_userbot(user_id, phone, session_str):
@@ -65,15 +62,21 @@ async def start_userbot(user_id, phone, session_str):
         client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
         await client.connect()
         
-        @client.on(events.NewMessage(from_users=MONITOR_BOT))
+        # Message Listener
+        @client.on(events.NewMessage)
         async def msg_handler(event):
-            target = db_execute("SELECT target_group FROM settings WHERE user_id=?", (user_id,))
-            if target and target[0][0]:
-                try:
-                    await client.forward_messages(target[0][0], event.message)
-                    logger.info(f"Forwarded to {target[0][0]}")
-                except Exception as e:
-                    logger.error(f"Forward failed: {e}")
+            # Check if message is from our target bot
+            sender = await event.get_sender()
+            if isinstance(sender, User) and sender.username and sender.username.lower() == TARGET_BOT_USERNAME.lower():
+                target = db_execute("SELECT target_group FROM settings WHERE user_id=?", (user_id,))
+                
+                if target and target[0][0]:
+                    target_group = target[0][0]
+                    try:
+                        await client.forward_messages(target_group, event.message)
+                        logger.info(f"Message forwarded to {target_group}")
+                    except Exception as e:
+                        logger.error(f"Failed to forward to {target_group}: {e}")
             
         userbot_clients[user_id] = client
         return client
@@ -81,7 +84,7 @@ async def start_userbot(user_id, phone, session_str):
         logger.error(f"Userbot start failed: {e}")
         return None
 
-# ================== BOT HANDLERS ==================
+# ================== MAIN BOT HANDLERS ==================
 bot_app = None 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,25 +93,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "LOGGED IN" if acc else "NOT LOGGED IN"
     
     kb = [
-        [InlineKeyboardButton("ADD ACCOUNT", callback_data="add_acc")],
+        [InlineKeyboardButton("ADD ACCOUNT (LOGIN)", callback_data="add_acc")],
         [InlineKeyboardButton("SET TARGET GROUP", callback_data="set_target")],
         [InlineKeyboardButton("VIEW STATUS", callback_data="view_status")]
     ]
-    
     await update.message.reply_text(f"Welcome!\nStatus: {status}", reply_markup=InlineKeyboardMarkup(kb))
 
 async def view_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     user_id = query.from_user.id
     acc = db_execute("SELECT phone FROM accounts WHERE user_id=?", (user_id,))
     target = db_execute("SELECT target_group FROM settings WHERE user_id=?", (user_id,))
-    
     phone = acc[0][0] if acc else "Not Logged In"
     target_grp = target[0][0] if target else "Not Set"
     await query.edit_message_text(f"STATUS\nPhone: {phone}\nTarget: {target_grp}")
 
-# LOGIN
+# LOGIN FLOW
 async def add_acc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     await query.edit_message_text("Phone number daal (+91...):")
@@ -161,6 +161,7 @@ async def otp_keypad(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
     else:
         if len(otp) < 5: otp += data
+        
     context.user_data['otp_entered'] = otp
     display = otp + "_" * (5 - len(otp))
     try: await query.edit_message_text(f"OTP: {display}", reply_markup=query.message.reply_markup)
@@ -180,20 +181,20 @@ async def save_login(update: Update, context: ContextTypes.DEFAULT_TYPE, client,
     user_id = update.effective_user.id if update.effective_user else update.callback_query.from_user.id
     db_execute("INSERT OR REPLACE INTO accounts (user_id, phone, session) VALUES (?,?,?)", (user_id, phone, session_str))
     await start_userbot(user_id, phone, session_str)
-    await bot_app.bot.send_message(chat_id=user_id, text="Login successful!")
+    await bot_app.bot.send_message(chat_id=user_id, text="Account successfully login ho gaya!")
     await client.disconnect()
 
-# TARGET
+# SET TARGET GROUP
 async def set_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    await query.edit_message_text("Group ka username daal (@ ke bina):")
+    await query.edit_message_text("Group ka link daal jaha message bhejna h (jaise: https://t.me/yourgroup):")
     return ASK_TARGET_GROUP
 
 async def save_target_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.text.strip()
     user_id = update.effective_user.id
     db_execute("INSERT OR REPLACE INTO settings (user_id, target_group) VALUES (?,?)", (user_id, target))
-    await update.message.reply_text(f"Target set to: {target}")
+    await update.message.reply_text(f"Target group set ho gaya: {target}")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,10 +204,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== MAIN ==================
 def main():
     global bot_app
-    
-    # Start port server
     threading.Thread(target=run_server, daemon=True).start()
-    
     bot_app = Application.builder().token(BOT_TOKEN).build()
 
     login_conv = ConversationHandler(
@@ -232,7 +230,7 @@ def main():
     bot_app.add_handler(target_conv)
     bot_app.add_handler(CallbackQueryHandler(view_status, pattern="^view_status$"))
 
-    logger.info("Bot started on Render!")
+    logger.info("Bot running...")
     bot_app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
 
 if __name__ == "__main__":
